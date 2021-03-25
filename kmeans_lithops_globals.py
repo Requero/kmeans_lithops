@@ -4,6 +4,7 @@ import numpy as np
 import lithops.multiprocessing as mplths
 import multiprocessing as mp
 import itertools
+from scipy.spatial.distance import cdist
 
 lock = None
 barrier = None
@@ -13,7 +14,7 @@ worker_stats = None
 
 def main(datapoints_per_file, dimensions,clusters,parallelism,number_of_iterations,threshold,local, localhost= False):
 
-    manager = mp.Manager() if local == True else mplths.Manager()
+    manager = mplths.Manager()# if local == True else mplths.Manager()
     global lock
     lock = manager.Lock()
     global barrier
@@ -21,8 +22,8 @@ def main(datapoints_per_file, dimensions,clusters,parallelism,number_of_iteratio
     global global_centroids
     global_centroids = manager.dict()
     global global_delta
-    global_delta = manager.dict({"delta": 0.0, "delta_c": 0.0, 
-                                "delta_temp": 0.0, "delta_st": 0.0})
+    global_delta = manager.dict({"delta": 1, "delta_c": 0, 
+                                "delta_temp": 0, "delta_st": 0})
     global worker_stats
     worker_stats = manager.list()     # in seconds
     
@@ -82,9 +83,11 @@ def main(datapoints_per_file, dimensions,clusters,parallelism,number_of_iteratio
     print(f"Total k-means time: {time.time() - start_time} s")
     print(f"Average iterations time: {avg_time} s")
     print(global_centroids.items())
-    print(global_centroids.items())
-    print(global_centroids.items())
-    print(global_centroids.items())
+    #import matplotlib.pyplot as plt
+    #for k,v in global_centroids.items():
+    #    plt.scatter(v['centroids'][0], v['centroids'][1], alpha = 0.6, s=10)
+    #plt.show()
+    
     where = ''
     if local ==True:
         where = 'local'
@@ -93,7 +96,7 @@ def main(datapoints_per_file, dimensions,clusters,parallelism,number_of_iteratio
     else:
         where = 'serverless'
 
-    with open('time_break_'+where+'_'+str(datapoints_per_file)+'_'+str(dimensions)+'_'+str(parallelism)+'_'+str(clusters)+'_'+str(number_of_iterations)+'.txt', 'a+') as f:
+    with open('time_break_globals_'+where+'_'+str(datapoints_per_file)+'_'+str(dimensions)+'_'+str(parallelism)+'_'+str(clusters)+'_'+str(number_of_iterations)+'.txt', 'a+') as f:
         f.write(f"{time.time() - start_time}\n")
         f.write(f"{avg_time}\n")
         for item in worker_stats:
@@ -118,51 +121,70 @@ class GlobalCentroids(object):
         return "centroid" + str(centroid)
 
     def random_init(self,num_dimensions):
+        global global_centroids
         global lock 
         lock.acquire()
+        #temp_dict = {}
         for i in range(self.num_clusters):
             random.seed(1002+i)
-            temp_dict =  {}
-            temp_dict['centroids'] = np.random.normal(0, 1,num_dimensions)
-            temp_dict['counters'] = 0
-            global global_centroids
-            global_centroids[self.centroid_key(i)] = temp_dict
+            #temp_dict =  {}
+            #temp_dict['centroids'] = np.random.normal(0, 1,num_dimensions)
+            global_centroids[self.centroid_key(i)] = {
+                'centroids':np.random.normal(0, 1,num_dimensions),
+                'counters':0}
+        #global_centroids = temp_dict
         lock.release()
 
     def update(self,coordinates, sizes):
         for k in range(self.num_clusters):
-            self._update_centroid(k, coordinates[k].tolist(), int(sizes[k]))
+            self._update_centroid(k, coordinates[k], int(sizes[k]))
 
     def _update_centroid(self, cluster_id, coordinates, size):
         # Current centroid
+        global global_centroids
         global lock
         centroid_k = self.centroid_key(cluster_id)
         lock.acquire()
-        global global_centroids
-        temp_dict = global_centroids[centroid_k]
-        n = len(temp_dict['centroids'])
-        count = temp_dict['counters']
+        #print(global_centroids)
+        temp_dict = global_centroids[centroid_k]#.copy()
+        #print(temp_dict.items())
+        #print(temp_dict)
+        #lock.release()
+        #barrier.wait()
+        #count = temp_dict['counters']
 
         # First update
-        if count == 0:
-            centroid_temp = np.zeros(n)
-            sizes_temp =  0
-        else:
-            centroid_temp = temp_dict['centroids_temp']
-            sizes_temp =temp_dict['sizes_temp']
+        #if count == 0:
+        if temp_dict['counters'] == 0:
+            #centroid_temp = np.zeros(len(temp_dict['centroids']))
+            #sizes_temp =  0
+            temp_dict['centroids_temp'] = np.zeros(len(temp_dict['centroids']))
+            temp_dict['sizes_temp'] =  0
+        #else:
+            #centroid_temp = temp_dict['centroids_temp']
+            #sizes_temp =temp_dict['sizes_temp']
 
-        centroid_temp =  centroid_temp + coordinates
-        sizes_temp += size
-        count += 1
-        temp_dict['centroids_temp'] = centroid_temp
-        temp_dict['sizes_temp'] = sizes_temp
-        
-        if count== self.parallelism :
-            if sizes_temp != 0:
-                temp_dict['centroids'] = centroid_temp/sizes_temp
+        #centroid_temp =  centroid_temp + coordinates
+        #sizes_temp += size
+        #count += 1
+        #temp_dict['centroids_temp'] = centroid_temp
+        #temp_dict['sizes_temp'] = sizes_temp
+
+        temp_dict['centroids_temp'] += coordinates
+        temp_dict['sizes_temp']  += size
+        temp_dict['counters'] += 1
+
+        #if count== self.parallelism:
+        if temp_dict['counters'] == self.parallelism:
+            #if sizes_temp != 0:
+            if temp_dict['sizes_temp'] != 0:
+                #temp_dict['centroids'] = centroid_temp/sizes_temp
+                temp_dict['centroids'] = temp_dict['centroids_temp']/temp_dict['sizes_temp']
             temp_dict['counters'] = 0
-        else: 
-            temp_dict['counters'] = count
+        #else: 
+        #    temp_dict['counters'] = count
+        #lock.acquire()
+        #print(temp_dict.items())
         global_centroids[centroid_k] = temp_dict
         lock.release()
 
@@ -170,7 +192,8 @@ class GlobalCentroids(object):
         global lock
         lock.acquire()
         global global_centroids
-        b = [global_centroids[self.centroid_key(k)]['centroids'] for k in range(self.num_clusters)]
+        temp_dict = global_centroids#.copy()
+        b = [temp_dict[self.centroid_key(k)]['centroids'] for k in range(self.num_clusters)]
         lock.release()
         return b
 
@@ -189,7 +212,8 @@ class GlobalDelta(object):
         temp_dict["delta_c"] = 0
         temp_dict["delta_temp"] = 0
         temp_dict["delta_st"] = 0
-        global_delta = temp_dict
+        global_delta = temp_dict 
+        #global_delta = {"delta": 1, "delta_c": 0, "delta_temp": 0, "delta_st": 0}
         lock.release()
 
     def get_delta(self):
@@ -203,27 +227,44 @@ class GlobalDelta(object):
     def update(self,delta, num_points): 
         global lock
         global global_delta
+        #global barrier
         lock.acquire()
-        temp_dict = global_delta
-
-        count = temp_dict["delta_c"]
-        tmp_delta = temp_dict["delta_temp"]
-        tmp_points = temp_dict["delta_st"]
+        temp_dict = global_delta#.copy()
+        #print(global_delta)
+        #print(temp_dict)
+        #print(temp_dict.items())
+        #lock.release()
+        #barrier.wait()
+        #count = temp_dict["delta_c"]
+        #tmp_delta = temp_dict["delta_temp"]
+        #tmp_points = temp_dict["delta_st"]
         
-        count += 1
-        tmp_delta += delta
-        tmp_points += num_points
+        #count += 1
+        #tmp_delta += delta
+        #tmp_points += num_points
+        temp_dict["delta_c"] += 1
+        temp_dict["delta_temp"] += delta
+        temp_dict["delta_st"] += num_points
 
-        if count == self.parallelism:
-            temp_dict["delta"] = tmp_delta / tmp_points
+        #if count == self.parallelism:
+        if temp_dict["delta_c"] == self.parallelism:
+            #temp_dict["delta"] = tmp_delta / tmp_points
+            temp_dict["delta"] = temp_dict["delta_temp"] / temp_dict["delta_st"]
             temp_dict["delta_c"] = 0
             temp_dict["delta_temp"] = 0
             temp_dict["delta_st"] = 0
-        else:
-            temp_dict["delta_c"] = count
-            temp_dict["delta_temp"] = tmp_delta
-            temp_dict["delta_st"] = tmp_points
-        global_delta = temp_dict
+        #else:
+            #temp_dict["delta_c"] = count
+            #temp_dict["delta_temp"] = tmp_delta
+            #temp_dict["delta_st"] = tmp_points
+        #lock.acquire()
+        #print(temp_dict)
+        #print(temp_dict.items())
+        #global_delta["delta"] = temp_dict["delta"]
+        #global_delta["delta_c"] = temp_dict["delta_c"]
+        #global_delta["delta_temp"] = temp_dict["delta_temp"]
+        #global_delta["delta_st"] = temp_dict["delta_st"]
+        global_delta = temp_dict#.copy()
         lock.release()
 
 class Worker(object):
@@ -301,27 +342,43 @@ class Worker(object):
         self.local_partition = np.random.randn(self.partition_points ,self.num_dimensions)
         #self.local_partition = np.random.randn(self.end_partition -self.start_partition ,self.num_dimensions)
 
-    def distance(self, point, centroid):
-        """Euclidean squared distance."""
-        return np.linalg.norm(point - centroid)
-
     def compute_clusters(self):
-        delta = 0
-        for i in range(0, self.end_partition-self.start_partition):
-            point = self.local_partition[i]
-            dists = ((point - self.correct_centroids) ** 2).sum(axis=1)
-            cluster = np.argmin(dists)
-
-            self.local_centroids[cluster] += point
-
-            self.local_sizes[cluster] += 1
-
-            # If now point is a member of a different cluster
-            if self.local_membership[i] != cluster:
-                delta += 1
-                self.local_membership[i] = cluster
-
+        # delta = 0
+        # for i in range(0, self.partition_points):
+        #     point = self.local_partition[i]
+        #     distances = ((point - self.correct_centroids) ** 2).sum(axis=1)
+        #     cluster = np.argmin(distances)
+        #
+        #     # add new point to local centroid
+        #     self.local_centroids[cluster] += point
+        #     self.local_sizes[cluster] += 1
+        #
+        #     # If now point is a member of a different cluster
+        #     if self.local_membership[i] != cluster:
+        #         delta += 1
+        #         self.local_membership[i] = cluster
+        #
+        # return delta
+        points = self.local_partition
+        centroids = self.correct_centroids
+        dists = cdist(points, centroids, 'sqeuclidean')
+        # for each point, id of closest cluster
+        min_dist_cluster_id = dists.argmin(1)  # aka memberships
+        # count of points to each cluster
+        self.local_sizes = np.bincount(min_dist_cluster_id,
+                                       minlength=self.num_clusters)
+        # sum of points to each cluster
+        cluster_ids = np.unique(min_dist_cluster_id)
+        for cluster_id in cluster_ids:
+            points[min_dist_cluster_id == cluster_id] \
+                .sum(axis=0, out=self.local_centroids[cluster_id])
+        # check changes in membership
+        new_memberships = min_dist_cluster_id
+        delta = np.count_nonzero(
+            np.add(new_memberships, - self.local_membership))
+        self.local_membership = new_memberships
         return delta
 
 if __name__ == "__main__":
-    main(695866,100,25,6,10,0.00001, False, False)
+    main(695866,100,25,10,10,0.00001, False, False)
+    #main(100,2,2,2,10,0.00001, False, False)
